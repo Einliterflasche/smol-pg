@@ -1,166 +1,170 @@
-use std::io::{self, IoSlice};
-use std::net::TcpStream;
+mod message;
+
+use message::{BackendMessageType, Message, RawMessage};
+
+use std::io;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 
 use async_io::Async;
 use futures_lite::prelude::*;
 
-thiserror_lite::err_enum! {
-    #[derive(Debug)]
-    pub enum Error {
-        #[error("couldn't connect to server")]
-        ConnectionError(io::Error),
-        #[error("attempted to connect to invalid address")]
-        InvalidAddress(io::Error)
-    }
+use macro_rules_attribute::apply;
+use thiserror_lite::err_enum;
+
+/// The protocol version this client implements:
+///
+/// `3.0`
+const PROTOCOL_VERSION: i32 = 0x00030000;
+
+/// Default postgres server port
+const POSTGRES_PORT: u16 = 5432;
+
+#[apply(err_enum)]
+#[derive(Debug)]
+pub enum Error {
+    #[error("couldn't connect to server")]
+    ConnectionError(io::Error),
+    #[error("failed to send/recieve data")]
+    NetworkError(io::Error),
+    #[error("recieved message with unknown type")]
+    UnknownMessage(u8),
+    #[error("couldn't parse expected message")]
+    InvalidMessage(BackendMessageType, &'static str),
 }
 
 pub struct Client {
     pub stream: Async<TcpStream>,
+    options: Options,
+}
+
+pub struct Options {
+    pub address: SocketAddr,
+    pub user_name: String,
+    pub database: Option<String>,
 }
 
 impl Client {
-    pub async fn new(address: impl Into<std::net::SocketAddr>) -> Result<Client, Error> {
-        let stream = Async::<TcpStream>::connect(address)
+    pub async fn new(options: Options) -> Result<Client, Error> {
+        let stream = Async::<TcpStream>::connect(options.address)
             .await
-            .map_err(|e| Error::ConnectionError(e))?;
+            .map_err(Error::ConnectionError)?;
 
-        Ok(Client { stream })
+        Ok(Client { stream, options })
     }
 
-    pub async fn write_vectored(&mut self, content: &[u8]) -> io::Result<()> {
-        let len = (content.len() as u32 + 4).to_be_bytes();
+    pub async fn connect(&mut self) -> Result<(), Error> {
+        let startup_message = message::create_startup_message(&self.options);
 
-        let written = self
-            .stream
-            .write_vectored(&[IoSlice::new(&len), IoSlice::new(content)])
-            .await?;
-
-        if written == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "ascac"));
-        }
-
-        if written < content.len() + 4 {
-            return Err(io::Error::new(io::ErrorKind::Other, "as"));
-        }
+        self.stream
+            .write_all(&startup_message)
+            .await
+            .map_err(Error::ConnectionError)?;
 
         Ok(())
     }
 
-    pub async fn write_vectored_with_version(&mut self, content: &[IoSlice<'_>]) -> io::Result<()> {
-        const PROT_VERSION: [u8; 4] = 0x00030000u32.to_be_bytes();
-
-        let content_len = content.iter().map(|i| i.len()).sum();
-
-        let content = content
-            .into_iter()
-            .fold(Vec::with_capacity(content_len), |mut acc, i| {
-                acc.extend_from_slice(i);
-                acc
-            });
-
-        let written = self
-            .stream
-            .write_vectored(&[
-                IoSlice::new(&(content_len as u32 + 8).to_be_bytes()),
-                IoSlice::new(&PROT_VERSION),
-                IoSlice::new(&content),
-            ])
-            .await?;
-
-        dbg!(written, content.len() + 8);
-
-        if written == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "couldn't write to stream",
-            ));
-        }
-        if written < content.len() + 8 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "couldn't completely write to stream",
-            ));
-        }
-
-        Ok(())
+    pub async fn send_message(&mut self, message: &RawMessage) -> Result<(), Error> {
+        self.send_bytes(&message.buffer).await
     }
 
-    pub async fn read_with_char(&mut self) -> Result<RawResponse, io::Error> {
-        let mut head = [0u8; 5];
-        self.stream.read_exact(&mut head).await?;
+    async fn send_bytes(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.stream
+            .write_all(bytes)
+            .await
+            .map_err(Error::NetworkError)?;
 
-        let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) - 4;
+        self.stream.flush().await.map_err(Error::NetworkError)
+    }
 
-        let mut buf = vec![0; len as usize];
-        self.stream.read_exact(&mut buf).await?;
+    pub async fn recv_message(&mut self) -> Result<Message, Error> {
+        // The first byte of each message (execpt the startup message)
+        // represents the message type.
+        let mut type_ = [0u8];
+        self.stream
+            .read_exact(&mut type_)
+            .await
+            .map_err(Error::NetworkError)?;
+        let type_ = type_[0];
 
-        Ok(RawResponse {
-            ty: head[0],
-            content: buf,
+        // The next 4 bytes of each message represent the length of the
+        // message contents including the 4 bytes themselves.
+        let mut message_len_buff = [0u8; 4];
+        self.stream
+            .read_exact(&mut message_len_buff)
+            .await
+            .map_err(Error::NetworkError)?;
+
+        // subtract 4 to get the number of bytes left to read
+        let message_len = u32::from_be_bytes(message_len_buff) - 4;
+
+        // empty buffer of size message_len
+        let mut contents = vec![0; message_len as usize];
+        // read rest of the message contents
+        self.stream
+            .read_exact(&mut contents)
+            .await
+            .map_err(Error::NetworkError)?;
+
+        let mut full_buffer = vec![type_];
+        full_buffer.extend_from_slice(&message_len_buff);
+        full_buffer.extend_from_slice(&contents);
+
+        Ok(Message {
+            type_,
+            len: message_len,
+            buffer: full_buffer,
         })
     }
-
-    async fn start_up(&mut self, user: &str) -> Result<(), io::Error> {
-        self.write_vectored_with_version(&[
-            IoSlice::new(b"user\0"),
-            IoSlice::new(user.as_bytes()),
-            IoSlice::new(&[0, 0]),
-        ])
-        .await?;
-
-        let raw_res = self.read_with_char().await?;
-        let res: AuthenticationSasl = (&raw_res).try_into()?;
-        dbg!(res.0);
-
-        Ok(())
-    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct RawResponse {
-    ty: u8,
-    content: Vec<u8>,
-}
+impl Default for Options {
+    fn default() -> Self {
+        const DEFAULT_USER: &'static str = "postgres";
 
-struct AuthenticationSasl<'a>(Vec<&'a str>);
-
-impl<'a> TryFrom<&'a RawResponse> for AuthenticationSasl<'a> {
-    type Error = io::Error;
-
-    fn try_from(raw: &'a RawResponse) -> Result<Self, Self::Error> {
-        let auth_type = &raw.content[0..4];
-        if auth_type != &[0, 0, 0, 10] {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "invalid auth_type/format",
-            ));
+        Self {
+            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, POSTGRES_PORT)),
+            user_name: DEFAULT_USER.to_string(),
+            database: None,
         }
-
-        let mechanisms = std::str::from_utf8(&raw.content[4..])
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "invalid utf8"))?;
-
-        Ok(AuthenticationSasl(
-            mechanisms.split_terminator('\0').collect(),
-        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::ToSocketAddrs;
-
     use tokio_postgres::{connect, NoTls};
 
-    use crate::Client;
+    use crate::{
+        message::{
+            backend::{DataRow, ErrorResponse},
+            create_query_message, BackendMessageType,
+        },
+        Client, Options,
+    };
 
     #[tokio::test]
     async fn simple() -> Result<(), Box<dyn std::error::Error>> {
-        let addr = "localhost:5432".to_socket_addrs()?.next().unwrap();
-        let mut c = Client::new(addr).await?;
+        let mut client = Client::new(Options::default()).await?;
 
-        c.start_up("postgres").await?;
+        client.connect().await?;
 
-        Ok(())
+        loop {
+            let message = client.recv_message().await?;
+            let message_type = dbg!(BackendMessageType::try_from(message.type_)?);
+
+            match message_type {
+                BackendMessageType::ReadyForQuery => {
+                    client.send_bytes(&create_query_message("SELECT 5")).await?;
+                }
+                BackendMessageType::Error => {
+                    dbg!(ErrorResponse::try_from(message.buffer.as_slice())?);
+                }
+                BackendMessageType::DataRow => {
+                    let data_row = DataRow::try_from(message.buffer.as_slice())?;
+                    dbg!(data_row);
+                }
+                _ => (),
+            }
+        }
     }
 
     #[tokio::test]

@@ -9,6 +9,10 @@ edition = "2021"
 async-io = "1.13"
 futures-lite = { version = "1.13", default-features = false }
 thiserror_lite = "0.1"
+macro_rules_attribute = "0.2"
+
+# crypto
+hmac-sha256 = "1.1"
 
 [dev-dependencies]
 tokio-postgres = "0.7"
