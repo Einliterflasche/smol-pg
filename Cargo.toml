@@ -6,9 +6,6 @@ edition = "2021"
 [dependencies]
 thiserror_lite = "0.1"
 macro_rules_attribute = "0.2"
-bytes = "1.8"
-
-async-net = "2.0"
 
 [dev-dependencies]
 smol = "2.0"

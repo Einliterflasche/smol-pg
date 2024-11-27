@@ -1,6 +1,7 @@
-pub mod codec;
-pub mod message;
-pub mod client;
+// Todo: add this again once we have an alternative to thiserror_lite
+// #![no_std] 
+
+pub mod util;
 
 use macro_rules_attribute::apply;
 use thiserror_lite::err_enum;
@@ -17,7 +18,7 @@ const POSTGRES_DEFAULT_PORT: u16 = 5432;
 #[derive(Debug)]
 pub enum Error {
     #[error("error encoding or decoding a message")]
-    CodecError(message::Error),
+    CodecError(),
     #[error("error connecting to the server")]
     IoError(std::io::Error)
 }
