@@ -1,7 +1,7 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::string::{String, FromUtf8Error};
+use alloc::string::FromUtf8Error;
 use alloc::vec::Vec;
 
 use macro_rules_attribute::apply;
