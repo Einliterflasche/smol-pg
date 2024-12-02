@@ -7,5 +7,8 @@ edition = "2021"
 thiserror_lite = "0.1"
 macro_rules_attribute = "0.2"
 
+async-net = { version = "2.0" }
+futures-lite = { version = "2.5" }
+
 [dev-dependencies]
 smol = "2.0"

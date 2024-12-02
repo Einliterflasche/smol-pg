@@ -1,6 +1,6 @@
 # `smol-pg`
 
-Toying aroung with a runtine-agnostic (sans-io), small footprint client for PostgreSQL.
+Toying aroung with a small footprint client for PostgreSQL.
 
 ### Roadmap
 
@@ -9,6 +9,5 @@ Toying aroung with a runtine-agnostic (sans-io), small footprint client for Post
 - [ ] Implement simple query execution
 - [ ] Implement extended query execution
 - [ ] Implement authentication methods
-- [ ] Implement SSL/TLS support
 - [ ] Implement LISTEN/NOTIFY support
-
+- [ ] _(Implement SSL/TLS support?)_

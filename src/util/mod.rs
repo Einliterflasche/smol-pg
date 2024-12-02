@@ -1,4 +1,9 @@
-#![no_std]
+//! Utility functions and types.
+//! At the moment, this means helper structs for
+//! reading and writing from/to byte buffers.
+//!
+//! See [`Reader`] and [`Writer`] for more information.
+
 extern crate alloc;
 
 use alloc::string::FromUtf8Error;
@@ -8,6 +13,7 @@ use macro_rules_attribute::apply;
 use thiserror_lite::err_enum;
 
 /// Errors that can occur when encoding or decoding a value or message.
+#[allow(missing_docs)]
 #[apply(err_enum)]
 #[derive(Debug, Clone)]
 pub enum CodecError {
@@ -18,23 +24,27 @@ pub enum CodecError {
 }
 
 /// Errors that can occur when decoding a value or message from a byte buffer.
+#[allow(missing_docs)]
 #[apply(err_enum)]
 #[derive(Debug, Clone)]
 pub enum DecodeError {
-    #[error("unexpected EOF, buffer shorter than expected")]
+    #[error("encountered unexpected EOF: buffer shorter than expected")]
     UnexpectedEof,
-    #[error("unexpected byte, expected {expected}, got {got}")]
+    #[error("encountered unexpected byte, expected `{expected}`, got `{got}`")]
     UnexpectedByte { expected: u8, got: u8 },
-    #[error(transparent)]
+    #[error("encountered unexpected value: {0}")]
+    UnexpectedValue(String),
+    #[error("encountered non-UTF-8 string")]
     Utf8Error(FromUtf8Error),
 }
 
 /// Errors that can occur when encoding a value or message to a byte buffer.
+#[allow(missing_docs)]
 #[apply(err_enum)]
 #[derive(Debug, Clone)]
 pub enum EncodeError {
-    #[error("attempted to backtrack too many bytes")]
-    BufferTooShort,
+    #[error("encountered unexpected EOF: buffer shorter than expected")]
+    UnexpectedEof,
 }
 
 /// A helper struct to read values from a byte buffer
@@ -50,10 +60,25 @@ pub struct Writer {
     buffer: Vec<u8>,
 }
 
+impl From<EncodeError> for CodecError {
+    fn from(value: EncodeError) -> Self {
+        CodecError::Encode(value)
+    }
+}
+
+impl From<DecodeError> for CodecError {
+    fn from(value: DecodeError) -> Self {
+        CodecError::Decode(value)
+    }
+}
+
 impl<'a> Reader<'a> {
     /// Create a new reader over a given buffer.
     pub fn new(buffer: &'a [u8]) -> Self {
-        Self { buffer, position: 0 }
+        Self {
+            buffer,
+            position: 0,
+        }
     }
 
     /// Skip the next `n` bytes in the buffer.
@@ -145,6 +170,20 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    /// Read exactly `length` bytes from the buffer and throw an error
+    /// if the buffer contains more or less bytes than that.
+    pub fn read_remaining_bytes_exact(&mut self, length: usize) -> Result<&'a [u8], DecodeError> {
+        if self.position + length != self.buffer.len() {
+            return Err(DecodeError::UnexpectedEof);
+        }
+        let value = &self.buffer[self.position..self.position + length];
+
+        self.position += length;
+        self.ensure_remaining_exact(0)?;
+
+        Ok(value)
+    }
+
     /// Read a 32-bit integer from the buffer in big-endian (network) order.
     pub fn read_i32(&mut self) -> Result<i32, DecodeError> {
         let bytes = self.read_bytes::<4>()?;
@@ -181,8 +220,13 @@ impl<'a> Reader<'a> {
 impl Writer {
     /// Create a new writer.
     pub fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
+        Self { buffer: Vec::new() }
+    }
+
+    /// Skip the next `n` bytes in the buffer.
+    pub fn skip(&mut self, n: usize) {
+        for _ in 0..n {
+            self.buffer.push(0);
         }
     }
 
@@ -227,5 +271,27 @@ impl Writer {
     /// Finish the writer and return the underlying buffer.
     pub fn finish(self) -> Vec<u8> {
         self.buffer
+    }
+
+    /// Overwrite the length of the buffer with the given value.
+    /// All message types (except Startup) start with the message type byte and then the length.
+    pub fn overwrite_length(&mut self) -> Result<(), EncodeError> {
+        self.overwrite_length_at(1)
+    }
+
+    /// Overwrite the length of the buffer with the given value at a specific position.
+    ///
+    /// Fails if the buffer is not long enough to contain the length (4 bytes).
+    pub fn overwrite_length_at(&mut self, position: usize) -> Result<(), EncodeError> {
+        // Check that the buffer is long enough to contain the length
+        if self.buffer.len() < position + 4 {
+            return Err(EncodeError::UnexpectedEof);
+        }
+
+        // The length is the current length of the buffer plus 4 bytes for the length itself
+        let length = (self.buffer.len() + 4) as i32;
+        self.buffer[position..position + 4].copy_from_slice(&length.to_be_bytes());
+
+        Ok(())
     }
 }
