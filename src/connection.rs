@@ -40,20 +40,22 @@ impl Connection {
         let mut connection = Self::new(stream);
 
         // Startup routine
-        let startup_message = client::Startup::new("me".to_string(), None, None);
+        let startup_message = client::Startup::new("postgres".to_string(), None, None);
         connection.send_message(&startup_message).await?;
 
-        // Read the response
-        let response = connection.read_message().await?;
+        loop {
+            // Read the response
+            let response = connection.read_message().await?;
 
-        // Parse the response
-        let message =
-            server::Message::try_from(util::Reader::new(&response)).map_err(Error::CodecError)?;
+            // Parse the response
+            let message = server::Message::try_from(util::Reader::new(&response))
+                .map_err(Error::CodecError)?;
 
-        // Print the message
-        println!("{:?}", &message);
+            // Print the message
+            println!("{:?}", &message);
 
-        connection.response_buffer.push(message);
+            connection.response_buffer.push(message);
+        }
 
         Ok(connection)
     }
@@ -68,10 +70,15 @@ impl Connection {
 
     /// Send a message to the server.
     async fn send_message(&mut self, message: impl Into<Vec<u8>>) -> Result<(), Error> {
+        // Write the message to the stream
         self.stream
             .write_all(&message.into())
             .await
             .map_err(Error::NetworkError)?;
+
+        // Flush the stream to ensure the message is sent
+        self.stream.flush().await.map_err(Error::NetworkError)?;
+
         Ok(())
     }
 }

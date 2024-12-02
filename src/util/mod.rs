@@ -193,7 +193,10 @@ impl<'a> Reader<'a> {
     /// Read a C string (null-terminated) from the buffer.
     pub fn read_cstring(&mut self) -> Result<&'a str, DecodeError> {
         // Find the position of the null terminator
-        let null_position = self.buffer.iter().position(|byte| *byte == 0);
+        let null_position = self.buffer[self.position..]
+            .iter()
+            .position(|byte| *byte == 0) // This is the null terminator relative to our position
+            .map(|byte| byte + self.position); // This is the null terminator's absolute position
 
         let Some(null_position) = null_position else {
             return Err(DecodeError::UnexpectedEof);
@@ -245,6 +248,19 @@ impl Writer {
         self.buffer.extend_from_slice(&value.to_be_bytes());
     }
 
+    /// Write a 32-bit integer to the buffer in big-endian (network) order at a specific position.
+    pub fn write_i32_at(&mut self, value: i32, position: usize) -> Result<(), EncodeError> {
+        // Check that the buffer is long enough to contain the value
+        if self.buffer.len() < position + 4 {
+            return Err(EncodeError::UnexpectedEof);
+        }
+
+        // Write the value to the buffer at the position
+        self.buffer[position..position + 4].copy_from_slice(&value.to_be_bytes());
+
+        Ok(())
+    }
+
     /// Write a C string (null-terminated) to the buffer.
     pub fn write_cstring(&mut self, string: &str) {
         self.write_bytes(string.as_bytes());
@@ -268,30 +284,13 @@ impl Writer {
         Ok(())
     }
 
+    /// Return the current length of the underlying buffer.
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
     /// Finish the writer and return the underlying buffer.
     pub fn finish(self) -> Vec<u8> {
         self.buffer
-    }
-
-    /// Overwrite the length of the buffer with the given value.
-    /// All message types (except Startup) start with the message type byte and then the length.
-    pub fn overwrite_length(&mut self) -> Result<(), EncodeError> {
-        self.overwrite_length_at(1)
-    }
-
-    /// Overwrite the length of the buffer with the given value at a specific position.
-    ///
-    /// Fails if the buffer is not long enough to contain the length (4 bytes).
-    pub fn overwrite_length_at(&mut self, position: usize) -> Result<(), EncodeError> {
-        // Check that the buffer is long enough to contain the length
-        if self.buffer.len() < position + 4 {
-            return Err(EncodeError::UnexpectedEof);
-        }
-
-        // The length is the current length of the buffer plus 4 bytes for the length itself
-        let length = (self.buffer.len() + 4) as i32;
-        self.buffer[position..position + 4].copy_from_slice(&length.to_be_bytes());
-
-        Ok(())
     }
 }

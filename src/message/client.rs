@@ -53,11 +53,11 @@ impl From<&Startup> for Vec<u8> {
     fn from(message: &Startup) -> Self {
         let mut writer = Writer::new();
 
-        // Write the protocol version
-        writer.write_i32(crate::PROTOCOL_VERSION);
-
         // Reserve space for the length of the message.
         writer.skip(4);
+
+        // Write the protocol version
+        writer.write_i32(crate::PROTOCOL_VERSION);
 
         // Write the user name
         writer.write_cstring("user");
@@ -74,12 +74,7 @@ impl From<&Startup> for Vec<u8> {
 
         // Overwrite the length of the message.
         writer
-            .overwrite_length_at(4)
-            .expect("more than 4 bytes of message content");
-
-        // Overwrite the length of the message after the protocol version.
-        writer
-            .overwrite_length_at(4)
+            .write_i32_at(writer.len() as i32, 0)
             .expect("more than 4 bytes of message content");
 
         // Finish the message.

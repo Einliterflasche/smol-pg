@@ -1,5 +1,7 @@
 //! Server-to-client messages.
 
+use std::collections::HashMap;
+
 use crate::util::{CodecError, DecodeError, Reader};
 
 /// The type of server-to-client messages.
@@ -9,6 +11,10 @@ use crate::util::{CodecError, DecodeError, Reader};
 pub enum Message {
     /// A message regarding authentication.
     Authentication(Authentication),
+    /// A message indicating that an error occurred.
+    Error(Error),
+    /// A message indicating that a parameter status has changed.
+    ParameterStatus(ParameterStatus),
     /// A message indicating that the server is ready for a new query.
     ReadyForQuery,
 }
@@ -23,18 +29,35 @@ pub enum Authentication {
     Sasl(Vec<String>),
 }
 
+/// A response indicating that an error occurred.
+#[derive(Debug, Clone)]
+pub struct Error {
+    fields: HashMap<u8, String>,
+}
+
+/// A message indicating that a parameter status has changed.
+#[derive(Debug, Clone)]
+pub struct ParameterStatus {
+    /// The name of the parameter that changed.
+    name: String,
+    /// The new value of the parameter.
+    value: String,
+}
+
 impl<'a> TryFrom<Reader<'a>> for Message {
     type Error = CodecError;
 
-    fn try_from(mut reader: Reader<'a>) -> Result<Self, Self::Error> {
+    fn try_from(mut reader: Reader<'a>) -> Result<Self, <Self as TryFrom<Reader<'a>>>::Error> {
         // The first byte is always the message type.
         let msg_type = match reader.read_u8()? {
             b'R' => Message::ReadyForQuery,
             b'K' => Message::Authentication(Authentication::try_from(reader)?),
+            b'E' => Message::Error(Error::try_from(reader)?),
+            b'S' => Message::ParameterStatus(ParameterStatus::try_from(reader)?),
             otherwise => {
                 return Err(DecodeError::UnexpectedValue(format!(
-                    "unknown message type: `{}`",
-                    otherwise
+                    "unknown message type: `{}`, or byte value `{}`",
+                    otherwise as char, otherwise
                 ))
                 .into())
             }
@@ -77,5 +100,41 @@ impl<'a> TryFrom<Reader<'a>> for Authentication {
             ))
             .into()),
         }
+    }
+}
+
+impl<'a> TryFrom<Reader<'a>> for Error {
+    type Error = CodecError;
+
+    fn try_from(mut reader: Reader<'a>) -> Result<Self, Self::Error> {
+        // Ignore the length field.
+        reader.skip(4)?;
+
+        let mut fields = HashMap::new();
+
+        // Read the fields and values
+        while reader.peek_u8()? != 0 {
+            let field = reader.read_u8()?;
+            let value = reader.read_cstring()?.to_owned();
+
+            fields.insert(field, value);
+        }
+
+        Ok(Error { fields })
+    }
+}
+
+impl<'a> TryFrom<Reader<'a>> for ParameterStatus {
+    type Error = CodecError;
+
+    fn try_from(mut reader: Reader<'a>) -> Result<Self, Self::Error> {
+        // Ignore the length field.
+        reader.skip(4)?;
+
+        // Read the name and value of the parameter.
+        let name = reader.read_cstring()?.to_owned();
+        let value = reader.read_cstring()?.to_owned();
+
+        Ok(ParameterStatus { name, value })
     }
 }
