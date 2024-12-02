@@ -4,10 +4,7 @@
 //!
 //! See [`Reader`] and [`Writer`] for more information.
 
-extern crate alloc;
-
-use alloc::string::FromUtf8Error;
-use alloc::vec::Vec;
+use std::string::FromUtf8Error;
 
 use macro_rules_attribute::apply;
 use thiserror_lite::err_enum;
@@ -184,10 +181,27 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    /// Peek at the next 32-bit integer in the buffer without advancing the position.
+    pub fn peek_i32(&self) -> Result<i32, DecodeError> {
+        let bytes = self.peek_bytes::<4>()?;
+        Ok(i32::from_be_bytes(*bytes))
+    }
+
     /// Read a 32-bit integer from the buffer in big-endian (network) order.
     pub fn read_i32(&mut self) -> Result<i32, DecodeError> {
         let bytes = self.read_bytes::<4>()?;
         Ok(i32::from_be_bytes(*bytes))
+    }
+
+    /// Returns an error if the next 32-bit integer in the buffer is not equal to
+    /// the expected value or the buffer does not contain enough bytes to contain a
+    /// 32-bit integer.
+    pub fn expect_i32(&self, value: i32) -> Result<(), DecodeError> {
+        if self.peek_i32()? != value {
+            return Err(DecodeError::UnexpectedEof);
+        }
+
+        Ok(())
     }
 
     /// Read a C string (null-terminated) from the buffer.

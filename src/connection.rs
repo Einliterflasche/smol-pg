@@ -1,7 +1,7 @@
 //! This module contains the networking part of the connection.
 //! Here, we write the messages to and read them from the buffer.
 
-use std::net::IpAddr;
+use std::{collections::VecDeque, net::IpAddr};
 
 use async_net::TcpStream;
 use futures_lite::{AsyncReadExt, AsyncWriteExt};
@@ -20,7 +20,11 @@ pub struct Connection {
     /// The bi-directional stream that is the transport layer.
     stream: TcpStream,
     /// Here we buffer responses from the server until we handle them.
-    response_buffer: Vec<server::Message>,
+    response_buffer: VecDeque<server::Message>,
+    /// Whether we are ready to send a query to the server.
+    ready_to_query: bool,
+    /// The key data from the backend we need to cancel queries.
+    key_data: Option<server::KeyData>,
 }
 
 impl Connection {
@@ -37,34 +41,38 @@ impl Connection {
             .map_err(Error::NetworkError)?;
 
         // Create the connection
-        let mut connection = Self::new(stream);
+        let mut conn = Self::new(stream);
 
         // Startup routine
         let startup_message = client::Startup::new("postgres".to_string(), None, None);
-        connection.send_message(&startup_message).await?;
+        conn.send_message(&startup_message).await?;
 
+        // Buffer all messages until we are ready to query
         loop {
-            // Read the response
-            let response = connection.read_message().await?;
+            let response = conn.read_message().await?;
 
-            // Parse the response
-            let message = server::Message::try_from(util::Reader::new(&response))
-                .map_err(Error::CodecError)?;
+            tracing::debug!(response=?&response, "Received message from server");
 
-            // Print the message
-            println!("{:?}", &message);
-
-            connection.response_buffer.push(message);
+            // We won't handle any messages until we are ready to query
+            match response {
+                server::Message::ReadyForQuery => {
+                    conn.ready_to_query = true;
+                    break;
+                }
+                otherwise => conn.response_buffer.push_back(otherwise),
+            }
         }
 
-        Ok(connection)
+        Ok(conn)
     }
 
     /// Create a new connection from a bi-directional stream.
     pub fn new(stream: TcpStream) -> Self {
         Self {
             stream,
-            response_buffer: Vec::new(),
+            response_buffer: VecDeque::new(),
+            ready_to_query: false,
+            key_data: None,
         }
     }
 
@@ -81,11 +89,9 @@ impl Connection {
 
         Ok(())
     }
-}
 
-impl Connection {
     /// Read a message from the stream, appending it to the buffer (resizing it if necessary).
-    async fn read_message(&mut self) -> Result<Vec<u8>, Error> {
+    async fn read_message(&mut self) -> Result<server::Message, Error> {
         // This is how many bytes of header each response has
         const HEADER_LENGTH: usize = 5;
 
@@ -130,6 +136,40 @@ impl Connection {
             .await
             .map_err(Error::NetworkError)?;
 
-        Ok(buf)
+        // Decode the message
+        let message = server::Message::try_from(util::Reader::new(&buf))
+            .map_err(Error::CodecError)?;
+
+        Ok(message)
+    }
+
+    /// Read a message from the stream now, without waiting for more data,
+    /// or return `None` if there are no bytes available to read.
+    async fn read_message_now(&mut self) -> Result<Option<server::Message>, Error> {
+        tracing::trace!("Checking for available bytes");
+
+        // If there are no bytes available, return `None`
+        if !self.has_bytes().await? {
+            tracing::trace!("No bytes available to read");
+            return Ok(None);
+        }
+
+        tracing::trace!("Bytes available, reading message");
+
+        // Otherwise, read the message
+        Ok(Some(self.read_message().await?))
+    }
+
+    /// Check whether there are any bytes available to read.
+    async fn has_bytes(&mut self) -> Result<bool, Error> {
+        let mut buf = [0u8; 1];
+
+        // Peek at the first byte with a timeout of 0 to avoid blocking
+        let n = futures_lite::future::or(
+            self.stream.peek(&mut buf),
+            futures_lite::future::ready(Ok(0)),
+        ).await.map_err(Error::NetworkError)?;
+
+        Ok(n > 0)
     }
 }

@@ -4,11 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Error handling
 thiserror_lite = "0.1"
 macro_rules_attribute = "0.2"
-
+# Tracing
+tracing = "0.1"
+# Networking
 async-net = { version = "2.0" }
+# AsyncRead and AsyncWrite and extensions
 futures-lite = { version = "2.5" }
 
 [dev-dependencies]
 smol = "2.0"
+tracing-subscriber = "0.3"
