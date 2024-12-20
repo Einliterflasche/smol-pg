@@ -1,5 +1,5 @@
 //! This module contains the networking part of the connection.
-//! Here, we write the messages to and read them from the buffer.
+//! Here, we write the messages to and read them from the buffer and handle them.
 
 use std::{collections::VecDeque, net::IpAddr};
 
@@ -7,7 +7,7 @@ use async_net::TcpStream;
 use futures_lite::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
-    message::{client, server},
+    protocol::{message::{client, server}, QueryResult},
     util::{self, DecodeError},
     Error,
 };
@@ -26,6 +26,7 @@ pub struct Connection {
     /// The key data from the backend we need to cancel queries.
     key_data: Option<server::KeyData>,
 }
+
 
 impl Connection {
     /// Open and return a new connection to the PostgreSQL server
@@ -64,6 +65,50 @@ impl Connection {
         }
 
         Ok(conn)
+    }
+
+    /// Send a query to the server.
+    pub async fn query(&mut self, query: &str) -> Result<QueryResult, Error> {
+        let query_message = client::Query::new(query.to_string());
+        self.send_message(&query_message).await?;
+
+        let mut row_description = None;
+        let mut data_rows = Vec::new();
+
+        // Read messages until we have a command complete message
+        loop {
+            let response = self.read_message().await?;
+
+            tracing::debug!(response=?&response, "Received message from server");
+
+            match response {
+                // Command complete means we are done reading messages for this query
+                server::Message::CommandComplete(command_complete) => {
+                    tracing::debug!(command_complete=?command_complete, "Command complete");
+                    break;
+                }
+                // Row description is the header info for the result set
+                server::Message::RowDescription(description) => {
+                    row_description = Some(description);
+                }
+                // Data row is a row in the result set
+                server::Message::DataRow(data_row) => {
+                    tracing::debug!(data_row=?data_row, "Data row");
+                    data_rows.push(data_row);
+                }
+                // Error means something went wrong
+                server::Message::Error(error) => {
+                    tracing::error!(error=?error, "Query error");
+                    panic!("oops");
+                }
+                // Otherwise, we just buffer this message for later processing
+                otherwise => {
+                    self.response_buffer.push_back(otherwise)
+                }
+            }
+        }
+
+        Ok(QueryResult::new(row_description.expect("row description missing"), data_rows))
     }
 
     /// Create a new connection from a bi-directional stream.
@@ -173,3 +218,5 @@ impl Connection {
         Ok(n > 0)
     }
 }
+
+

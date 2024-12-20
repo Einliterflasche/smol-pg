@@ -16,6 +16,13 @@ async fn actual_main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Creating connection");
 
-    let connection = Connection::create(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), None).await?;
+    let mut connection = Connection::create(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), None).await?;
+
+    tracing::info!("Connection created");
+
+    let result = connection.query("SELECT 1").await?;
+
+    tracing::debug!(result=?result, "Result");
+
     Ok(())
 }

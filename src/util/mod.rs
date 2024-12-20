@@ -147,8 +147,19 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    /// Read a slice of `n` bytes from the buffer.
+    pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
+        if self.position + n > self.buffer.len() {
+            return Err(DecodeError::UnexpectedEof);
+        }
+
+        let value = &self.buffer[self.position..self.position + n];
+        self.position += n;
+        Ok(value)
+    }
+
     /// Read a slice of `N` bytes from the buffer.
-    pub fn read_bytes<const N: usize>(&mut self) -> Result<&'a [u8; N], DecodeError> {
+    pub fn read_bytes_const<const N: usize>(&mut self) -> Result<&'a [u8; N], DecodeError> {
         if self.position + N > self.buffer.len() {
             return Err(DecodeError::UnexpectedEof);
         }
@@ -181,6 +192,12 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    /// Read a 16-bit integer from the buffer in big-endian (network) order.
+    pub fn read_i16(&mut self) -> Result<i16, DecodeError> {
+        let bytes = self.read_bytes_const::<2>()?;
+        Ok(i16::from_be_bytes(*bytes))
+    }
+
     /// Peek at the next 32-bit integer in the buffer without advancing the position.
     pub fn peek_i32(&self) -> Result<i32, DecodeError> {
         let bytes = self.peek_bytes::<4>()?;
@@ -189,7 +206,7 @@ impl<'a> Reader<'a> {
 
     /// Read a 32-bit integer from the buffer in big-endian (network) order.
     pub fn read_i32(&mut self) -> Result<i32, DecodeError> {
-        let bytes = self.read_bytes::<4>()?;
+        let bytes = self.read_bytes_const::<4>()?;
         Ok(i32::from_be_bytes(*bytes))
     }
 
@@ -224,6 +241,12 @@ impl<'a> Reader<'a> {
         Ok(string)
     }
 
+    /// Backtrack the last `n` bytes in the buffer, but at most the length of
+    /// the buffer.
+    pub fn backtrack(&mut self, n: usize) {
+        self.position = self.position.saturating_sub(n);
+    }
+
     /// Returns an error if the reader has not read all the bytes in the buffer.
     pub fn finish(self) -> Result<(), DecodeError> {
         if self.position != self.buffer.len() {
@@ -255,6 +278,11 @@ impl Writer {
     /// Write a slice of bytes to the buffer.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         self.buffer.extend_from_slice(bytes);
+    }
+
+    /// Write a 16-bit integer to the buffer in big-endian (network) order.
+    pub fn write_i16(&mut self, value: i16) {
+        self.buffer.extend_from_slice(&value.to_be_bytes());
     }
 
     /// Write a 32-bit integer to the buffer in big-endian (network) order.
@@ -306,5 +334,11 @@ impl Writer {
     /// Finish the writer and return the underlying buffer.
     pub fn finish(self) -> Vec<u8> {
         self.buffer
+    }
+}
+
+impl Default for Writer {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -6,7 +6,7 @@
 #![warn(missing_docs)]
 
 pub mod connection;
-pub mod message;
+pub mod protocol;
 pub mod util;
 
 use macro_rules_attribute::apply;

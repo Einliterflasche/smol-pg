@@ -4,20 +4,19 @@ use std::collections::HashMap;
 
 use crate::util::Writer;
 
-/// The type of client-to-server messages.
-pub enum MessageType {
-    /// The startup message sent by the client.
-    Startup,
-    /// A message initiating a simple query.
-    SimpleQuery,
-}
-
 /// The startup message sent by the client.
 pub struct Startup {
     /// The user name to connect as.
     user: String,
     /// Other, optional parameters.
     options: HashMap<String, String>,
+}
+
+
+/// A simple query message.
+pub struct Query {
+    /// The query to send to the server.
+    query: String,
 }
 
 impl Startup {
@@ -34,18 +33,6 @@ impl Startup {
         }
 
         Self { user, options }
-    }
-}
-
-impl From<MessageType> for Option<u8> {
-    /// These constants are defined by the protocol.
-    fn from(value: MessageType) -> Self {
-        let msg_type = match value {
-            MessageType::SimpleQuery => b'Q',
-            // The startup message has no type byte for historical reasons.
-            MessageType::Startup => return None,
-        };
-        Some(msg_type)
     }
 }
 
@@ -82,8 +69,32 @@ impl From<&Startup> for Vec<u8> {
     }
 }
 
-impl Default for Writer {
-    fn default() -> Self {
-        Self::new()
+impl Query {
+    /// Create a new query message.
+    pub fn new(query: String) -> Self {
+        Self { query }
+    }
+}
+
+impl From<&Query> for Vec<u8> {
+    fn from(message: &Query) -> Self {
+        let mut writer = Writer::new();
+
+        // This is the message type for a simple query.
+        writer.write_u8(b'Q');
+
+        // Reserve space for the length field.
+        writer.skip(4);
+
+        // Write the query string.
+        writer.write_cstring(&message.query);
+
+        // Overwrite the length field (-1 because this excludes the message type).
+        writer
+            .write_i32_at(writer.len() as i32 - 1, 1)
+            .expect("more than 4 bytes of message content");
+
+        // Finish the message.
+        writer.finish()
     }
 }
