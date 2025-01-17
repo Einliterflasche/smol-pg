@@ -9,6 +9,11 @@ use std::string::FromUtf8Error;
 use macro_rules_attribute::apply;
 use thiserror_lite::err_enum;
 
+use crate::connection::Row;
+
+/// A dynamically allocated, opaque error.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 /// Errors that can occur when encoding or decoding a value or message.
 #[allow(missing_docs)]
 #[apply(err_enum)]

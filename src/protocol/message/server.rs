@@ -1,8 +1,10 @@
 //! Server-to-client messages.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Index};
 
-use crate::util::{CodecError, DecodeError, Reader};
+use crate::util::{BoxError, CodecError, DecodeError, Reader};
+
+use super::parsing::FromSql;
 
 /// The type of server-to-client messages.
 ///
@@ -21,7 +23,7 @@ pub enum Message {
     KeyData(KeyData),
     /// The server is ready for a new query.
     ReadyForQuery,
-    /// A response to an empty query. 
+    /// A response to an empty query.
     /// This is issued instead of `CommandComplete` for empty queries.
     EmptyQuery,
     /// A command completed successfully.
@@ -83,46 +85,56 @@ pub struct CommandComplete {
     tag: String,
 }
 
-/// Information about the columns of a result set.
+/// The result of a (select-like) query.
 #[derive(Debug, Clone)]
-pub struct RowDescription {
-    fields: Vec<FieldDescription>,
+pub struct QueryResult {
+    /// The row description of the query.
+    row_description: RowDescription,
+    /// The data rows of the query.
+    data_rows: Vec<DataRow>,
 }
 
-/// A data row.
-#[derive(Debug, Clone)]
+/// Information about the columns of a result set.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowDescription {
+    pub fields: Vec<FieldDescription>,
+}
+
+/// A row containing a series of data cells representing a row in a [`QueryResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DataRow {
-    pub fields: Vec<Field>,
+    /// The different data fields in this row.
+    pub(crate) fields: Vec<Data>,
 }
 
 /// A field in a data row.
-#[derive(Debug, Clone)]
-pub struct Field(Vec<u8>);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Data(Vec<u8>);
 
 /// Information about a field in a result set.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FieldDescription {
     /// The name of the field.
-    name: String,
-    /// If the field is a column of a table, the object ID 
+    pub name: String,
+    /// If the field is a column of a table, the object ID
     /// of the table containing the field.
-    table_oid: Option<i32>,
+    pub table_oid: Option<i32>,
     /// If the field is a column of a table, the attribute number of the column.
-    attribute_number: Option<i16>,
+    pub attribute_number: Option<i16>,
     /// The object ID of the data type of the field.
-    data_type_oid: i32,
+    pub data_type_oid: i32,
     /// The length of the field in bytes.
-    data_type_size: i16,
+    pub data_type_size: i16,
     /// The type modifier of the field.
-    data_type_modifier: i32,
+    pub data_type_modifier: i32,
     /// The format code of the field.
     ///
     /// This is `0` for text format and `1` for binary format.
-    format_code: FormatCode,
+    pub format_code: FormatCode,
 }
 
 /// The format code of a field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FormatCode {
     /// Text format.
     Text,
@@ -146,13 +158,10 @@ impl<'a> TryFrom<Reader<'a>> for Message {
             b'N' => Message::Notice(Notice::try_from(reader)?),
             b'T' => Message::RowDescription(RowDescription::try_from(reader)?),
             b'D' => Message::DataRow(DataRow::try_from(reader)?),
-            otherwise => {
-                return Err(DecodeError::UnexpectedValue(format!(
-                    "unknown message type: `{}`, or byte value `{}`",
-                    otherwise as char, otherwise
-                ))
-                .into())
-            }
+            otherwise => Err(DecodeError::UnexpectedValue(format!(
+                "unknown message type: `{}`, or byte value `{}`",
+                otherwise as char, otherwise
+            )))?,
         };
 
         Ok(msg_type)
@@ -275,9 +284,12 @@ impl<'a> TryFrom<Reader<'a>> for KeyData {
         let process_id = reader.read_i32()?;
         let secret_key = reader.read_i32()?;
 
-        Ok(KeyData { process_id, secret_key })
-    }   
-}   
+        Ok(KeyData {
+            process_id,
+            secret_key,
+        })
+    }
+}
 
 impl<'a> TryFrom<Reader<'a>> for CommandComplete {
     type Error = CodecError;
@@ -305,8 +317,9 @@ impl<'a> TryFrom<Reader<'a>> for RowDescription {
 
         if field_count < 0 {
             return Err(DecodeError::UnexpectedValue(
-                "negative number of fields in row description".to_string()
-            ).into());
+                "negative number of fields in row description".to_string(),
+            )
+            .into());
         }
 
         let mut fields = Vec::with_capacity(field_count as usize);
@@ -331,7 +344,8 @@ impl<'a> TryFrom<Reader<'a>> for DataRow {
             0.. => n as usize,
             otherwise => {
                 return Err(DecodeError::UnexpectedValue(format!(
-                    "negative number of fields in data row: `{}`", otherwise
+                    "negative number of fields in data row: `{}`",
+                    otherwise
                 ))
                 .into());
             }
@@ -344,14 +358,14 @@ impl<'a> TryFrom<Reader<'a>> for DataRow {
             let field_size = match field_size {
                 1.. => field_size as usize,
                 _ => {
-                    fields.push(Field(Vec::new()));
+                    fields.push(Data(Vec::new()));
                     continue;
                 }
             };
 
             let bytes = reader.read_bytes(field_size)?.to_owned();
 
-            fields.push(Field(bytes));
+            fields.push(Data(bytes));
         }
 
         Ok(DataRow { fields })
@@ -389,15 +403,40 @@ impl<'a> TryFrom<&mut Reader<'a>> for FieldDescription {
             1 => FormatCode::Binary,
             otherwise => {
                 return Err(DecodeError::UnexpectedValue(format!(
-                    "unknown format code: `{}`", otherwise
+                    "unknown format code: `{}`",
+                    otherwise
                 ))
                 .into());
             }
         };
 
         Ok(FieldDescription {
-            name, table_oid, attribute_number, data_type_oid, data_type_size,
-            data_type_modifier, format_code,
+            name,
+            table_oid,
+            attribute_number,
+            data_type_oid,
+            data_type_size,
+            data_type_modifier,
+            format_code,
         })
+    }
+}
+
+impl RowDescription {
+    /// Get the index of a field by name.
+    pub(crate) fn field_index(&self, name: &str) -> Option<usize> {
+        self.fields.iter().position(|field| field.name == name)
+    }
+}
+
+impl<'a> Data {
+    /// Parse a value from text.
+    pub(crate) fn parse_text<T: FromSql<'a>>(&'a self) -> Result<T, BoxError> {
+        T::from_text(&self.0)
+    }
+
+    /// Parse a value from binary.
+    pub(crate) fn parse_binary<T: FromSql<'a>>(&'a self) -> Result<T, BoxError> {
+        T::from_binary(&self.0)
     }
 }

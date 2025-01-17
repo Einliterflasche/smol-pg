@@ -1,16 +1,35 @@
 //! This module contains the networking part of the connection.
 //! Here, we write the messages to and read them from the buffer and handle them.
 
-use std::{collections::VecDeque, net::IpAddr};
+use std::{collections::VecDeque, fmt::Display, net::IpAddr, sync::Arc};
 
 use async_net::TcpStream;
 use futures_lite::{AsyncReadExt, AsyncWriteExt};
+use macro_rules_attribute::apply;
+use thiserror_lite::err_enum;
 
 use crate::{
-    protocol::{message::{client, server}, QueryResult},
-    util::{self, DecodeError},
+    protocol::message::{
+        client,
+        parsing::FromSql,
+        server::{self, Data, FormatCode, RowDescription},
+    },
+    util::{self, BoxError, DecodeError},
     Error,
 };
+
+/// Errors that can occur when using the protocol.
+#[allow(missing_docs)]
+#[derive(Debug)]
+#[apply(err_enum)]
+pub enum ProtocolError {
+    #[error("missing row description")]
+    MissingRowDescription,
+}
+
+/// Attempted and failed to access a field of a row because it doesn't exist.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldNotFound(String);
 
 /// A connection to a PostgreSQL server.
 ///
@@ -27,6 +46,14 @@ pub struct Connection {
     key_data: Option<server::KeyData>,
 }
 
+/// A row in a result set.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Row {
+    /// The reference to the metadata of this row.
+    metadata: Arc<RowDescription>,
+    /// The fields in this row.
+    fields: Vec<Data>,
+}
 
 impl Connection {
     /// Open and return a new connection to the PostgreSQL server
@@ -68,7 +95,7 @@ impl Connection {
     }
 
     /// Send a query to the server.
-    pub async fn query(&mut self, query: &str) -> Result<QueryResult, Error> {
+    pub async fn query(&mut self, query: &str) -> Result<Vec<Row>, Error> {
         let query_message = client::Query::new(query.to_string());
         self.send_message(&query_message).await?;
 
@@ -102,13 +129,23 @@ impl Connection {
                     panic!("oops");
                 }
                 // Otherwise, we just buffer this message for later processing
-                otherwise => {
-                    self.response_buffer.push_back(otherwise)
-                }
+                otherwise => self.response_buffer.push_back(otherwise),
             }
         }
 
-        Ok(QueryResult::new(row_description.expect("row description missing"), data_rows))
+        // We received the complete response, now we can return the rows
+        let row_description =
+            Arc::new(row_description.ok_or(ProtocolError::MissingRowDescription)?);
+
+        let rows = data_rows
+            .into_iter()
+            .map(|data_row| Row {
+                metadata: row_description.clone(),
+                fields: data_row.fields,
+            })
+            .collect();
+
+        Ok(rows)
     }
 
     /// Create a new connection from a bi-directional stream.
@@ -182,8 +219,8 @@ impl Connection {
             .map_err(Error::NetworkError)?;
 
         // Decode the message
-        let message = server::Message::try_from(util::Reader::new(&buf))
-            .map_err(Error::CodecError)?;
+        let message =
+            server::Message::try_from(util::Reader::new(&buf)).map_err(Error::CodecError)?;
 
         Ok(message)
     }
@@ -213,10 +250,40 @@ impl Connection {
         let n = futures_lite::future::or(
             self.stream.peek(&mut buf),
             futures_lite::future::ready(Ok(0)),
-        ).await.map_err(Error::NetworkError)?;
+        )
+        .await
+        .map_err(Error::NetworkError)?;
 
         Ok(n > 0)
     }
 }
 
+impl Row {
+    /// Get the value of a field by its name.
+    pub fn get(&self, name: &str) -> Option<&Data> {
+        let index = self.metadata.field_index(name)?;
 
+        self.fields.get(index)
+    }
+
+    /// Get the value of a field and parse it to a specific type.
+    pub fn get_and_parse<'a, T: FromSql<'a>>(&'a self, name: &str) -> Result<T, BoxError> {
+        let data = self
+            .get(name)
+            .ok_or_else(|| Box::new(FieldNotFound(name.to_owned())))?;
+
+        let field_index = self.metadata.field_index(name).unwrap();
+        match self.metadata.fields[field_index].format_code {
+            FormatCode::Binary => data.parse_binary(),
+            FormatCode::Text => data.parse_text(),
+        }
+    }
+}
+
+impl Display for FieldNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "row doesn't contain field `{}`", &self.0)
+    }
+}
+
+impl std::error::Error for FieldNotFound {}

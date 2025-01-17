@@ -31,6 +31,8 @@ pub enum Error {
     CodecError(util::CodecError),
     #[error("error communicating via network")]
     NetworkError(std::io::Error),
+    #[error("unexpected message flow")]
+    ProtocolError(connection::ProtocolError),
 }
 
 impl From<std::io::Error> for Error {
@@ -42,5 +44,11 @@ impl From<std::io::Error> for Error {
 impl From<util::CodecError> for Error {
     fn from(value: util::CodecError) -> Self {
         Error::CodecError(value)
+    }
+}
+
+impl From<connection::ProtocolError> for Error {
+    fn from(value: connection::ProtocolError) -> Self {
+        Error::ProtocolError(value)
     }
 }
